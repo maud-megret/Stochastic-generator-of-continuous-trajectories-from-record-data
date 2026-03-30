@@ -1,0 +1,939 @@
+---
+title: "Neural Based Inference for the Browian Motion Model"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-09-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# I - Packages et fonctions
+
+```{r,results='hide'}
+library(reticulate)
+use_virtualenv("~/r-tf", required = TRUE) 
+library(tensorflow)
+library(keras)
+library(simrec)
+library(openxlsx)
+library(scales)
+library(ggplot2)
+library(gridExtra)
+py_config() 
+library(tidyr)
+library(dplyr)
+library(ggnewscale)
+```
+
+```{r}
+detect_records_maxima_norm<-function(X){
+  l=length(X)
+  rec_max=c(X[1])
+  ind_max<-c(1)
+  
+  for(i in 2:(l-1)){
+    #print(i)
+    if(X[i-1]<=X[i] && X[i]>X[i+1]){
+      l<-length(rec_max)
+      if(X[i]> rec_max[l]){
+        rec_max<-c(rec_max,X[i])
+        ind_max<-c(ind_max,i)
+      }
+    }
+  }
+  df<-data.frame(rec_max,ind_max)
+  return(df)
+}
+```
+
+# II - Préparation des échantillons
+
+
+## 1 - Paramétrisation
+
+### a) Utilisation des données du glacier des Bossons
+```{r}
+bossons <- read.xlsx("/home/mmegret/Documents/thèse Maud MEGRET/données/bossons2Phil.xlsx",sep=';')
+bossons_0_NA<-bossons[-which(bossons$`Position;front;(mean)`==NaN),]
+year<-bossons_0_NA$Year
+year_NA<-bossons$Year
+# en utilisant la bonne représentation 
+
+pos_inv<-rev(bossons_0_NA$`Position;front;(mean)`)
+pos_min_inv<-rev(bossons_0_NA$`Position;front;(min)`)
+pos_max_inv<-rev(bossons_0_NA$`Position;front;(max)`)
+
+pos_inv_NA<-rev(bossons$`Position;front;(mean)`)
+pos_min_inv_NA<-rev(bossons$`Position;front;(min)`)
+pos_max_inv_NA<-rev(bossons$`Position;front;(max)`)
+
+pos_NA<--as.numeric((bossons$`Position;front;(mean)`))
+pos_min_NA<--as.numeric((bossons$`Position;front;(min)`))
+pos_max_NA<--as.numeric((bossons$`Position;front;(max)`))
+
+X_NA<-as.numeric(pos_inv_NA)+1330
+X_0<-X_NA
+X_0[which(is.na(X_0))]<-0
+l_1_0<-(detect_records_maxima_norm(X_0)$ind_max[-1])[1]
+l_ind_0<-detect_records_maxima_norm(X_0)$ind_max[-1]
+recordTimes_0=l_ind_0
+recordValues_0=(detect_records_maxima_norm(X_0)$rec_max[-1])
+dMor_0=cbind(recordTimes_0,recordValues_0)
+dMor_0<-dMor_0[-4,]
+dMor_0<-dMor_0[-c(6,7,9),]
+
+mor1_0=dMor_0[1,1]
+morf_0=dMor_0[length(dMor_0[,1]),1]
+
+years_mor<-(mor1_0:morf_0)[dMor_0[,1]]
+w_1818<-which(year_NA>=1818)
+w_18_99<-which((year_NA[w_1818])<=1999)
+
+pos_0_NA<-pos_NA[w_1818]
+pos_0_NA[which(is.na(pos_0_NA))]<-0
+
+```
+
+
+### b) Graphique
+
+Transformation of the observed \textit{Glacier des Bossons} trajectory from 1818 to 1999 to fit the record theory framework. Source: \cite{nussbaumer2012little}. The blue dots are the observed moraines, and the black line is the real observed trajectory of the frontal position of the \textit{Glacier des Bossons}. Both are measured along a longitudial axis corresponding to the glacier flow direction. Subfigure a) : the x-axis represents the years and the y-axis the frontal position relative to the first moraine position that corresponds to the glacier maximal extent during the Littel Ice Age. Subfigure b) : the x-axis represents the number of years between 1999 and the year plotted and the y-axis position relative to the 1999 glacier frontal position.
+
+```{r}
+par(mfrow=(c(1,2)))
+plot((year_NA[w_1818])[w_18_99],-(pos_NA[w_1818])[w_18_99],type='l',xlab='Time (year)',ylab='Cumulative length change (m)',lwd=2)
+points(2011-dMor_0[,1],dMor_0[,2]-1330,pch=19,cex=2,col='blue')
+plot((mor1_0:morf_0)-12,X_NA[mor1_0:morf_0],type='l',xlab='Time from the last moraine (year)',ylab='Relavtive position (m)',lwd=2)
+points(dMor_0[,1]-12,dMor_0[,2],pch=19,cex=2,col='blue')
+legend('bottomright',legend=c('Moraines','Collected data'),pch=c(19,NA),lwd=c(NA,2),col=c('blue','black'))
+```
+
+
+### c) Paramètres
+
+```{r}
+N=length(mor1_0:morf_0)  #taille des trajectoires
+n_samples <- 100000 # nombre d'échantillon
+
+# matrice des trajectoires
+X_bm_NA <- matrix(NA, nrow = n_samples, ncol = N) 
+# matrice des paramètres du modèle brownien
+params_bm_NA <- matrix(0, nrow = n_samples, ncol = 2) 
+
+SigmaG <-1 #fixé
+Ssmin<-0
+Ssmax<-10
+Sdmin<-50
+Sdmax<-200
+```
+
+### d) Remplissage des matrices de trajectoires et de paramètres associés
+
+Code non executé car données sauvegardées
+
+```{r, eval=FALSE}
+for (i in 1:n_samples) {
+  SigmaS <- runif(1, Ssmin,Ssmax)
+  Sd <- runif(1, Sdmin,Sdmax)
+  #print(i)
+
+  traj_sim <- simRecords(dMor_0,
+                         N=N,
+                         gaussConv = TRUE,
+                         sigmaGauss = SigmaG,
+                         sigmaSmooth=SigmaS,
+                         sd = Sd)[,2]
+  params_bm_NA[i, ] <- c(SigmaS,Sd)
+  
+  X_bm_NA[i, ] <- traj_sim
+  
+}
+
+temps<-simRecords(dMor_0,
+                         N=N,
+                         gaussConv = TRUE,
+                         sigmaGauss = 1,
+                         sigmaSmooth=2.8,
+                         sd = 78.6)[,1]
+```
+
+### e) Enregistrement des données simulées et des paramètres associés
+
+```{r}
+#save(temps,X_bm_NA,params_bm_NA, file = "train_samples_NBIVF_big_bossons_NA_nm.RData")
+data<-load(file = "train_samples_NBIVF_big_bossons_NA_nm.RData")
+print(data)
+```
+
+### f) traitement des données
+
+```{r}
+# Normalisation légère de X 
+C <-max(abs(X_bm_NA))
+X_scaled <- as.matrix(X_bm_NA /C)
+
+# Normalisation des paramètres (Y)
+params_scale <- scale(params_bm_NA)
+Y_scaled <- as.matrix(params_scale)
+
+# Split train/test
+set.seed(42)
+n_total <- nrow(X_scaled)
+test_frac <- 0.2
+test_idx <- sample(1:n_total, size = floor(test_frac * n_total))
+train_idx <- setdiff(1:n_total, test_idx)
+
+X_train <- X_scaled[train_idx, ]
+Y_train <- Y_scaled[train_idx, ]
+
+X_test  <- X_scaled[test_idx, ]
+Y_test  <- Y_scaled[test_idx, ]
+
+set.seed(123)
+missing_idx <- which(runif(length(X_train)) < 0.3)  # 30% de trous
+X_train[missing_idx] <- NA
+mask_train <- ifelse(is.na(X_train), 0, 1)
+mask_test  <- ifelse(is.na(X_test), 0, 1)
+
+# Remplace les NAs par 0
+X_train_filled <- ifelse(is.na(X_train), 0, X_train)
+X_test_filled  <- ifelse(is.na(X_test), 0, X_test)
+
+```
+
+# III - Définition du modèle
+
+## 1 - Architecture
+
+### a) Définition de l'architecture
+
+```{r}
+input_x <- layer_input(shape = c(ncol(X_train_filled)), name = "traj_input")
+input_m <- layer_input(shape = c(ncol(mask_train)), name = "mask_input")
+
+concat <- layer_concatenate(list(input_x, input_m))
+
+hidden <- concat %>%
+  layer_dense(64, activation = "softplus",
+              kernel_initializer = initializer_he_normal()) %>%
+  layer_dense(32, activation = "softplus",
+              kernel_initializer = initializer_he_normal())
+
+y_out <- hidden %>%
+  layer_dense(ncol(Y_train), activation = "linear")
+
+model_BM <- keras_model(inputs = list(input_x, input_m), outputs = y_out)
+```
+
+### b) Possibilité d'avoir des données manquantes
+
+```{r}
+masked_mse <- function(y_true, y_pred, mask) {
+  K <- backend()
+  mask <- K$cast(mask, K$floatx())
+  diff <- K$square(y_true - y_pred)
+  masked_diff <- diff * mask
+  loss <- K$sum(masked_diff) / (K$sum(mask) + 1e-8)
+  return(loss)
+}
+
+masked_loss_wrapper <- function(mask_input) {
+  function(y_true, y_pred) {
+    K <- backend()
+    diff <- K$square(y_true - y_pred)
+    masked_diff <- diff * mask_input
+    loss <- K$sum(masked_diff) / (K$sum(mask_input) + 1e-8)
+    return(loss)
+  }
+}
+```
+
+## 2 - Compilation
+
+```{r, results='hide'}
+model_BM$compile(
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  loss = "mse", 
+  #loss=masked_loss_wrapper(mask_input),
+  metrics = list(keras$metrics$MeanSquaredError())
+)
+```
+
+## 3 - Entraînement
+
+### a) Si on veut un early stop
+
+```{r, results='hide'}
+early_stop <- callback_early_stopping(
+  monitor = "val_loss",
+  patience = 10,
+  restore_best_weights = TRUE
+)
+```
+
+### b) Entraînement
+
+```{r, eval=FALSE}
+history <- model_BM$fit(
+  x = list(X_train_filled, mask_train),
+  y = Y_train,
+  epochs = 100L,
+  batch_size = 32L,
+  verbose = 0,
+  validation_split = 0.2,
+  #callbacks = list(early_stop)
+)
+```
+
+### c) Sauvegarde des données d'entraînement et du modèle
+
+```{r}
+#h<-history$history$loss
+#h_val<-history$history$val_loss
+#save(h,h_val, file = "history_NBIVF_big_bossons_NA_nm.RData")
+data<-load(file = "history_NBIVF_big_bossons_NA_nm.RData")
+print(data)
+
+# Sauvegarde complète du modèle
+#save_model_hdf5(model_BM, "mon_modele.h5")
+
+# Rechargement plus tard
+model_BM <- load_model_hdf5("mon_modele.h5",compile=FALSE)
+```
+
+# IV - Résultats du modèle
+
+## 1 - Evolution de la fonction de perte
+
+```{r}
+plot(h, type="l", col="blue", lwd=2,xlab='epoch',ylab='loss')
+lines(h_val, col="red", lwd=2)
+legend("topright", legend=c("Train","Val"), col=c("blue","red"), lty=1, lwd=2)
+```
+
+## 2 - Prédiction sur les échantillons de test
+
+```{r,results='hide'}
+pred_scaled <- model_BM$predict(list(X_test_filled, mask_test),verbose=0)
+
+
+mu <- attr(params_scale, "scaled:center")
+sd <- attr(params_scale, "scaled:scale")
+
+pred <- sweep(pred_scaled, 2, sd, `*`) # dénormalisation
+pred <- sweep(pred, 2, mu, `+`)
+```
+
+## 3 - Quantification des prédictions
+
+### a)  Definitions des métriques
+
+```{r}
+rmse <- function(y_true, y_pred) {
+  sqrt(mean((y_true - y_pred)^2))
+}
+
+mae <- function(y_true, y_pred) {
+  mean(abs(y_true - y_pred))
+}
+
+r2 <- function(y_true, y_pred) {
+  1 - sum((y_true - y_pred)^2) / sum((y_true - mean(y_true))^2)
+}
+```
+
+### b) Calcul pour chaque paramètre
+
+```{r}
+
+rmse_sigmaS <- rmse(params_bm_NA[test_idx,1], pred[,1])
+rmse_Sd     <- rmse(params_bm_NA[test_idx,2], pred[,2])
+
+mae_sigmaS <- mae(params_bm_NA[test_idx,1], pred[,1])
+mae_Sd     <- mae(params_bm_NA[test_idx,2], pred[,2])
+
+r2_sigmaS <- r2(params_bm_NA[test_idx,1], pred[,1])
+r2_Sd     <- r2(params_bm_NA[test_idx,2], pred[,2])
+
+# Affichage
+cat("RMSE SigmaS :", rmse_sigmaS, "\n")
+cat("RMSE Sd     :", rmse_Sd, "\n")
+cat("MAE SigmaS  :", mae_sigmaS, "\n")
+cat("MAE Sd      :", mae_Sd, "\n")
+cat("R² SigmaS   :", r2_sigmaS, "\n")
+cat("R² Sd       :", r2_Sd, "\n")
+
+```
+
+### c) Données manquantes
+
+```{r}
+
+mask_real <- ifelse(is.na( X_NA[mor1_0:morf_0]), 0, 1)
+X_real_filled <- ifelse(is.na(X_NA[mor1_0:morf_0]), 0,X_NA[mor1_0:morf_0]/C)
+X_real_filled <- matrix(X_real_filled, nrow = 1)
+mask_real     <- matrix(mask_real, nrow = 1)
+
+pred_scaled_bo <- model_BM$predict(list(X_real_filled, mask_real),verbose=0)
+
+pred_bo <- sweep(pred_scaled_bo, 2, sd, `*`) # dénormalisation
+pred_bo <- sweep(pred_bo, 2, mu, `+`)
+
+print(pred_bo)
+best_Ssm<-pred_bo[,1]
+best_Sd<-pred_bo[,2]
+```
+
+## 4 - Représentation graphique
+
+### a) Scatter plots et distribution des erreurs
+```{r,results='hide'}
+# Préparer les données pour ggplot
+df_sigmaS <- data.frame(
+  réel = params_bm_NA[test_idx,1],
+  prédit = pred[,1],
+  erreur = abs(params_bm_NA[test_idx,1] - pred[,1])/params_bm_NA[test_idx,1]
+)
+
+quant_cut <- quantile(df_sigmaS$erreur, 0.95, na.rm = TRUE)
+df_sigmaS_filtre <- df_sigmaS[df_sigmaS$erreur < quant_cut, ]
+
+
+df_Sd <- data.frame(
+  réel = params_bm_NA[test_idx,2],
+  prédit = pred[,2],
+  erreur = abs(params_bm_NA[test_idx,2] - pred[,2])/params_bm_NA[test_idx,2]
+)
+
+# Scatter plot réel vs prédit
+
+
+p1 <- ggplot(df_sigmaS, aes(x=réel, y=prédit)) +
+  geom_point(color=alpha('#8F09C8',0.1), alpha=0.1) +
+  geom_abline(intercept=0, slope=1, color="red", linetype="dashed", size=0.5) +
+  annotate("text", x =8, 
+           y = 0, 
+           label = "--- : x = y", color = "red", size = 4, fontface = "italic") +
+  xlab("Real s") + ylab("Prediction") +
+  ggtitle("Scatter plot for s") +
+  theme_minimal()
+
+p2 <- ggplot(df_Sd, aes(x=réel, y=prédit)) +
+  geom_point(color=alpha('#D1C700',0.1), alpha=0.1) +
+  geom_abline(intercept=0, 
+              slope=1, 
+              color="red", 
+              linetype="dashed", 
+              size=0.5) +
+  ggtitle("Scatter plot for sigma") +
+  annotate("text", x =175, 
+           y = 20, 
+           label = "--- : x = y", color = "red", size = 4, fontface = "italic") +
+  xlab("Real sigma") + ylab("Prediction") +
+  theme_minimal()
+
+# Histogrammes des erreurs
+p3 <- ggplot(df_sigmaS_filtre, aes(x=erreur)) +
+  geom_histogram( bins=20,fill=alpha('#8F09C8',0.5), color="white", alpha=0.7) +
+  ggtitle("MAPE for s") + xlab("MAPE") + ylab("Count") +
+  theme_minimal()
+
+p4 <- ggplot(df_Sd, aes(x=erreur)) +
+  geom_histogram(bins=20, fill=alpha('#D1C700',0.5), color="white", alpha=0.7) +
+  ggtitle("MAPE for sigma") + xlab("MAPE") + ylab("Count") +
+  theme_minimal()
+
+# Combiner les plots dans une grille 2x2
+grid.arrange(p1, p2, p3, p4, ncol=2)
+```
+
+# V - Comparaison entre paramètres prédits et paramètres aléatoires
+## 1 - Création d'échantillons
+```{r,eval=FALSE}
+# Paramètres prédits
+best_s<-2.8
+best_sigma<-78.6
+ss_pb<-best_s
+sd_pb<-best_sigma
+n_test_pb<-10000
+
+# Matrice
+X_pb_NA<-matrix(nrow=n_test_pb,ncol=N)
+
+# Simulation
+for (i in 1:n_test_pb) {
+  #print(i)  
+
+  traj_sim <- simRecords(dMor_0,
+                         N=N,
+                         gaussConv = TRUE,
+                         sigmaGauss = SigmaG,
+                         sigmaSmooth=ss_pb,
+                         sd = sd_pb)[,2]
+  
+  X_pb_NA[i, ] <- traj_sim
+  
+}
+```
+
+```{r}
+#save(X_pb_NA, file = "X_pb_NA_NBIVF_big_bossons_NA_nm.RData")
+data<-load(file = "X_pb_NA_NBIVF_big_bossons_NA_nm.RData")
+print(data)
+```
+
+## 2 - Comparaisons
+### a) Moyennes et enveloppes
+```{r}
+moyenne_all <- apply(X_bm_NA, 2, mean)
+q5_all <- apply(X_bm_NA, 2, quantile, probs = 0.05)
+q95_all <- apply(X_bm_NA, 2, quantile, probs = 0.95)
+
+
+moyenne_pb <- apply(X_pb_NA, 2, mean)
+q5_pb <- apply(X_pb_NA, 2, quantile, probs = 0.05)
+q95_pb <- apply(X_pb_NA, 2, quantile, probs = 0.95)
+
+```
+
+### b) Aire des enveloppes
+
+```{r}
+aire_pb<- sum((q95_pb - q5_pb)) * mean(diff(temps))
+print(aire_pb)
+aire_all<- sum((q95_all - q5_all)) * mean(diff(temps))
+print(aire_all)
+```
+
+
+### c) Figure 10
+Area and mean of the simulated trajectories with or without the predicted parameters. The black line is the real trajectory of the \textit{Glacier des Bossons}. Blue elements correspond to simulations made with random parameters $\sigma$ and $s$ (chosen according to their prior distribution). Orange elements correspond to simulations made with the parameters predicted by the neural network (presented in table \ref{tab:results_param_bossons}). Transparent areas are the envelopes (see equations \eqref{eq:quantile} and \eqref{eq:fct_dist})  of the simulations and the dotted lines are the mean of the simulations.
+
+```{r}
+
+plot(temps,moyenne_all,col='#6190E8',lwd=2,lty=2,xlab = "Time (year)", ylab = "Position (m)",ylim=c(min(q5_all),max(moyenne_pb)),type='l')
+lines(temps,moyenne_pb,col='#E8BB61',lwd=2,lty=2)
+
+polygon(c(temps, rev(temps)), c(q5_pb, rev(q95_pb)),
+        col = alpha('orange',0.2), border = NA)
+polygon(c(temps, rev(temps)), c(q5_all, rev(q95_all)),
+        col = alpha('blue',0.1), border = NA)
+lines((mor1_0:morf_0),X_NA[(mor1_0:morf_0)],type='l',lwd=3)
+points(dMor_0[,1],dMor_0[,2],pch=19,cex=2,col='blue')
+legend(
+  "bottomright",
+  legend = c(expression(bold("With predictions")), "90% interval", "Mean",expression(bold("Without predictions")), "90% interval", "Mean"),
+  col = c(NA,  alpha("orange", 0.2), "#E8BB61",NA, alpha("blue", 0.1), "#6190E8"),
+  lwd = c(2, 10, 2,2,  10, 2),
+  lty = c(1, 2,2, 1, 2,2),
+  bty = "n"
+)
+
+
+```
+
+### d) Calcul des meilleures trajectoires
+
+```{r}
+mse <- function(a,b) mean((a-b)^2)
+MAPE <- function(a, b) {
+  mean(abs(a - b) / abs(b), na.rm = TRUE)
+}
+w<- which(!is.na(X_NA[mor1_0:morf_0]))
+
+err_pred <- apply(X_pb_NA[,w], 1,function(x) mse((X_NA[mor1_0:morf_0])[w]  , x))
+err_rand <-apply(X_bm_NA[,w], 1,function(x) mse((X_NA[mor1_0:morf_0])[w], x))
+
+w1<-which(err_pred==min(err_pred))
+w2<-which(err_rand==min(err_rand))
+err_pred_MAPE <- apply(X_pb_NA[,w],1, function(x) MAPE((X_NA[mor1_0:morf_0])[w], x))
+err_rand_MAPE <- apply(X_bm_NA[,w], 1,function(x) MAPE((X_NA[mor1_0:morf_0])[w], x))
+```
+
+### e) Figure 11
+Simulated trajectories with or without the predicted parameters. The black line is the real trajectory of the \textit{Glacier des Bossons}. Blue elements correspond to simulations made with random parameters $\sigma$ and $s$ (chosen according to their distribution). Orange elements correspond to simulations made with the parameters predicted by the neural network (presented in table \ref{tab:results_param_bossons}). Ten random trajectories for each parameters area have been represented as well as the best trajectory in term of MSE (see Equation \ref{mse}).
+```{r}
+
+plot(temps,X_pb_NA[w1,],col='orange',lwd=3,type='l',
+     xlab = "Time (year)", ylab = "Position (m)",ylim=c(min(q5_all),max(moyenne_pb)))
+lines(temps,X_bm_NA[w2,],col='blue',lwd=3)
+for(i in 1:5){
+  lines(temps,X_bm_NA[i,],col='#54B8D6',lwd=1,lty=2)
+  lines(temps,X_pb_NA[i,],col='#EDBC80',lwd=1,lty=2)
+}
+lines(temps,X_pb_NA[w1,],col='orange',lwd=2,type='l',
+     xlab = "Time (year)", ylab = "Position (m)",
+     main = "Brownian method with the best predicted parameters",ylim=c(min(q5_all),max(moyenne_pb)))
+lines(temps,X_bm_NA[w2,],col='blue',lwd=2)
+#polygon(c(temps, rev(temps)), c(q5_pb, rev(q95_pb)),
+ #       col = alpha('orange',0.2), border = NA)
+#polygon(c(temps, rev(temps)), c(q5_all, rev(q95_all)),
+ #       col = alpha('blue',0.1), border = NA)
+
+
+legend(
+  "bottomright",
+  legend = c(expression(bold("With predictions : ")), "Best trajectory","5 other trajectories", expression(bold("Without predictions : ")), "Best trajectory","5 other trajectories"),
+  col = c(NA, "orange",'#EDBC80', NA, "blue",'#54B8D6'),
+  lwd = c(3, 3,1,3, 3,1),
+  lty = c(1, 1,2, 1,1,2),
+  bty = "n"
+)
+lines((mor1_0:morf_0),X_NA[(mor1_0:morf_0)],type='l',lwd=3)
+points(dMor_0[,1],dMor_0[,2],pch=19,cex=2,col='blue')
+legend("bottomleft",legend=c('Moraines','Real trajectory'),lty=c(NA,1),lwd=c(NA,3),col=c('blue',1),pch=c(19,NA),bty = "n")
+```
+
+### f) Résumé des erreurs
+
+```{r}
+summary_pred <- c(mean = mean(err_pred), median = median(err_pred), sd = sd(err_pred))
+summary_rand <- c(mean = mean(err_rand), median = median(err_rand), sd = sd(err_rand))
+print("Résumé MSE (prédit vs aléatoire) :")
+print(round(rbind(pred = summary_pred, rand = summary_rand), 5))
+
+summary_pred <- c(mean = mean(err_pred_MAPE), median = median(err_pred_MAPE), sd = sd(err_pred_MAPE))
+summary_rand <- c(mean = mean(err_rand_MAPE), median = median(err_rand_MAPE), sd = sd(err_rand_MAPE))
+print("Résumé MAPE (prédit vs aléatoire) :")
+print(round(rbind(pred = summary_pred, rand = summary_rand), 5))
+print(mean(err_pred_MAPE)/mean(err_rand_MAPE))
+
+```
+
+### g) Figure 8
+Violin plots of the distributions of the 95\% interval of the errors with the predicted parameters or with random ones. Subfigure a) illustrates the MSE  (see Equation \eqref{mse}) and subfigure b) the MAPE (see Equation \eqref{mape}). For both subfigures, the violin plots show the distribution of the error between the real \textit{Glacier des Bossons} trajectory and the predictions. The left violin plots are made on simulations made with random parameters $\sigma$ and $s$ (chosen according to their prior distribution) and the right violin plots are made on simulations made with the parameters predicted by the neural network (presented in Table \ref{tab:results_param_bossons}).  
+
+```{r}
+
+# Fusionner les deux ensembles d'erreurs dans un seul data frame
+df_errors <- data.frame(Predicted=err_pred,Random=err_rand)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "MSE")
+
+# (Optionnel) filtrage des extrêmes si tu veux couper le 95e percentile
+quant_cut <- quantile(df_long$MSE, 0.95, na.rm = TRUE)
+df_long <- df_long[df_long$MSE < quant_cut, ]
+
+ggplot(df_long, aes(x = type, y = MSE, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  geom_boxplot(width = 0.08, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  xlab("Parameters used") + 
+  ylab("MSE") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+```
+
+```{r}
+
+# Fusionner les deux ensembles d'erreurs dans un seul data frame
+df_errors <- data.frame(Predicted=err_pred_MAPE,Random=err_rand_MAPE)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "MAPE")
+
+quant_cut <- quantile(df_long$MAPE, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$MAPE < quant_cut, ]
+
+
+
+ggplot(df_long, aes(x = type, y = MAPE, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  xlab("Parameters used") + ylab("MAPE") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+
+
+```
+
+
+
+```{r}
+# stat sur les erreurs en fct des paramètres 
+R2_s<-c(0.967,0.959,0.965,0.969,0.966,0.953,0.970)
+R2_s_frac<-R2_s/sum(R2_s)
+R2_sigma<-c(0.796,0.795,0.739,0.778,0.795,0.667,0.764)
+R2_sigma_frac<-R2_sigma/sum(R2_sigma)
+R2_mean<-(R2_s+R2_sigma)/2
+pred_s<-c(3.132,2.014,2.734,2.883,2.816,2.826,3.478)
+pred_sigma<-c(83.982,78.749,64.597,77.527,76.004,85.890,83.167)
+aire<-c(61830,50149,58502,57782,64683,59509)
+aire_frac<-aire/104407
+err<-c(19083,16925,17996,17862,20498,18055)
+err_frac<-err/45899
+
+best_s<-0
+best_sigma<-0
+for(i in 1:length(R2_s)){
+  best_s<-best_s+R2_s_frac[i]*pred_s[i]
+  best_sigma<-best_sigma+R2_sigma_frac[i]*pred_sigma[i]
+}
+print(best_s)
+print(best_sigma)
+```
+
+# VI - Résultats approfondis
+## 1 - Métriques supplémentaires pour comparer les trajectoires
+### a) Définitions
+```{r}
+longueur_geo <- function(x, t) {
+  dt <- diff(t)
+  dx <- diff(x)
+  sum(sqrt(dt^2 + dx^2))
+}
+
+longueur_verticale <- function(x) {
+  sum(abs(diff(x)))
+}
+
+variance_temporelle <- function(x) {
+  var(x)
+}
+
+variance_increments <- function(x) {
+  var(diff(x))
+}
+
+energie_quad <- function(x) {
+  mean(diff(x)^2)
+}
+
+courbure_moyenne <- function(x) {
+  mean(abs(diff(x, differences = 2)))
+}
+
+aire_sous_courbe <- function(x, t) {
+  sum( (x[-1] + x[-length(x)]) / 2 * diff(t) )
+}
+```
+
+### b) Ce qu'on compare
+
+```{r}
+traj1<-X_bm_NA
+traj2<-X_pb_NA
+t<-1:(length(traj1[1,]))
+```
+
+### c) Calcul des métriques
+
+```{r}
+L1 <- apply(traj1, 1, longueur_geo, t = t)
+L2 <- apply(traj2, 1, longueur_geo, t = t)
+
+LV1 <- apply(traj1, 1, longueur_verticale)
+LV2 <- apply(traj2, 1, longueur_verticale)
+
+E1 <- apply(traj1, 1, energie_quad)
+E2 <- apply(traj2, 1,  energie_quad)
+
+C1 <- apply(traj1, 1, courbure_moyenne)
+C2 <- apply(traj2, 1, courbure_moyenne)
+
+V1 <- apply(traj1, 1, variance_temporelle)
+V2 <- apply(traj2, 1, variance_temporelle)
+
+VI1 <- apply(traj1, 1, variance_increments)
+VI2 <- apply(traj2, 1, variance_increments)
+
+AUC1 <- apply(traj1, 1, aire_sous_courbe,t)
+AUC2 <- apply(traj2, 1, aire_sous_courbe,t)
+```
+
+### d) Summary des métriques
+```{r}
+summary(V1)
+summary(V2)
+summary(VI1)
+summary(VI2)
+summary(AUC1)
+summary(AUC2)
+summary(C1)
+summary(C2)
+summary(E1)
+summary(E2)
+summary(LV1)
+summary(LV2)
+
+```
+
+### e) Figure 9
+
+Violin plots of the distributions of the 95\% interval of four different metrics (first line see equations \eqref{var},\eqref{geo_length}, second line see equations \eqref{auc}, \eqref{roughness}) computed on trajectories made with the predicted parameters (orange) or with random ones (blue). Red lines represent the values of those metrics for the interpolated real trajectory.
+```{r}
+# AUC
+df_errors <- data.frame(Predicted=AUC2,Random=AUC1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+AUC<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_hline(yintercept = 133742.2, color = "red", linetype = "dashed", size = 1)+
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  xlab("Parameters used") + ylab("Area Under the Curve") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# VI
+df_errors <- data.frame(Predicted=V2,Random=V1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+VI<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  xlab("Parameters used") + ylab("Variance of increments ") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# E
+df_errors <- data.frame(Predicted=E2,Random=E1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+E<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  geom_hline(yintercept = 1439.473, color = "red", linetype = "dashed", size = 1)+
+  xlab("Parameters used") + ylab("Roughness ") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# L
+df_errors <- data.frame(Predicted=L2,Random=L1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+L<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  geom_hline(yintercept = 5141.675, color = "red", linetype = "dashed", size = 1)+
+  xlab("Parameters used") + ylab("Geometric length") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+
+#LV
+df_errors <- data.frame(Predicted=L2,Random=L1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+LV<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  xlab("Parameters used") + ylab("Vertical length") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+
+# V
+df_errors <- data.frame(Predicted=V2,Random=V1)
+# Transformation au format "long"
+df_long <- df_errors |>
+  pivot_longer(cols = everything(),
+               names_to = "type",
+               values_to = "Roughness")
+
+quant_cut <- quantile(df_long$Roughness, 0.90, na.rm = TRUE)
+df_long <- df_long[df_long$Roughness < quant_cut, ]
+
+
+
+V<-ggplot(df_long, aes(x = type, y = Roughness, fill = type)) +
+  geom_violin(trim = FALSE, alpha = 0.4, linewidth = 0) +
+  scale_fill_manual(values = c(
+    "Predicted" = "orange",   # rouge
+    "Random" = "blue"       # jaune
+  )) +
+  geom_boxplot(width = 0.08, fill ='white', outlier.shape = NA) +
+  geom_hline(yintercept = 105776, color = "red", linetype = "dashed", size = 1)+
+  xlab("Parameters used") + ylab("Temporal variance") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+
+```
+
+```{r}
+library(gridExtra)
+
+grid.arrange(V,L,AUC,E, ncol = 2)
+```
+
