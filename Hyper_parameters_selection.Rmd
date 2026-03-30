@@ -1,5 +1,5 @@
 ---
-title: "Neural Based Inference for the Browian Motion Model"
+title: "Hyper parameters selection for the Browian Motion Model"
 output:
   pdf_document: default
   html_document: default
